@@ -8,8 +8,8 @@ namespace PhotonConnectionMonitor
 {
 	class Worker
 	{
-		private readonly string _homeUrl = "/home/home.html";
-		private readonly string _csrfTokenMetaItemName = "csrf-token";
+		private readonly string _homeUrl = "/html/home.html";
+		private readonly string _csrfTokenMetaItemName = "csrf_token";
 		private readonly RestClient _client;
 
 		public WorkerConfig Config { get; }
@@ -20,7 +20,7 @@ namespace PhotonConnectionMonitor
 		}
 
 		private string GetMetaTagContent(string html, string metaItemName) {
-			var metaTag = new Regex("<meta name=\"(.+?)\" content=\"(.+?)\">");
+			var metaTag = new Regex("<meta name=\"(.+?)\".*content=\"(.+?)\".*>");
 			var match = metaTag.Matches(html)
 				.FirstOrDefault(m => m.Groups[1].Value == metaItemName && m.Groups[2].Value != null);
 			return match == null
