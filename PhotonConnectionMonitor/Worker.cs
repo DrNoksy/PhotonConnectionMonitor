@@ -15,7 +15,7 @@ namespace PhotonConnectionMonitor
 {
 	public enum ConnectionStatus
 	{
-		Default = 0,
+		Empty = 0,
 		Connected = 901,
 		Disconnected = 902
 	}
@@ -56,6 +56,7 @@ namespace PhotonConnectionMonitor
 		private readonly string _stateLoginUrl = "/api/user/state-login";
 		private readonly string _statusUrl = "/api/monitoring/status";
 		private readonly string _dialUrl = "/api/dialup/dial";
+		private readonly string _internetTestUrl = "https://www.google.com/";
 
 		private readonly string _csrfTokenMetaItemName = "csrf_token";
 		private readonly string _requestTokenHeaderName = "__RequestVerificationToken";
@@ -66,8 +67,10 @@ namespace PhotonConnectionMonitor
 		private readonly int _reloginInterval = 3000;
 		private readonly int _checkStatusInterval = 3000;
 		private readonly int _lazyCheckStatusInterval = 10_000;
-		private readonly int _initSessionRetryInterval = 10 * 60 * 1000;
+		private readonly int _initSessionRetryInterval = 1000;
 		private readonly int _dialTimeout = 15_000;
+		private readonly int _internetTestDelay = 3000;
+		private readonly int _redialDelay = 3000;
 
 		private readonly RestClient _client;
 		private string _cookie;
@@ -85,6 +88,11 @@ namespace PhotonConnectionMonitor
 			IRestResponse response = await _client.ExecuteTaskAsync(request);
 			_cookie = Utils.GetHttpHeader(response.Headers, _setCookieHeaderName);
 			_csrfTokens = new Stack<string>(Utils.GetMetaTagContent(response.Content, _csrfTokenMetaItemName));
+		}
+
+		private void ClearSession() {
+			this._cookie = null;
+			this._csrfTokens.Clear();
 		}
 
 		private string ComputeUserPasswordHash(string userName, string userPassword, string csrfToken) {
@@ -151,21 +159,32 @@ namespace PhotonConnectionMonitor
 			var request = new RestRequest(_statusUrl, Method.GET);
 			request.AddHeader(_cookieHeaderName, _cookie);
 			IRestResponse response = await _client.ExecuteTaskAsync(request);
-			ConnectionStatusResponse responseObject = Utils.DeserializeXml<ConnectionStatusResponse>(response.Content);
-			return (ConnectionStatus)responseObject.ConnectionStatus;
+			try {
+				ConnectionStatusResponse responseObject = Utils.DeserializeXml<ConnectionStatusResponse>(response.Content);
+				return (ConnectionStatus)responseObject.ConnectionStatus;
+			} catch {
+				return ConnectionStatus.Empty;
+			}
 		}
 
 		private async Task<bool> GetIsConnectedAsync() {
 			return await GetConnectionStatusAsync() == ConnectionStatus.Connected;
 		}
 
-		private async Task<bool> DialAsync() {
+		private async Task<bool> TestInternet() {
+			var client = new RestClient(_internetTestUrl);
+			var request = new RestRequest("", Method.GET);
+			IRestResponse response = await client.ExecuteTaskAsync(request);
+			return response.StatusCode == System.Net.HttpStatusCode.OK;
+		}
+
+		private async Task<bool> DialAsync(DialAction action, bool isRedial = false) {
 			await TryInitSessionEndlesslyAsync();
 			var request = new RestRequest(_dialUrl, Method.POST);
 			request.AddHeader(_cookieHeaderName, _cookie);
 			request.AddHeader(_requestTokenHeaderName, _csrfTokens.Pop());
 			string xmlData = Utils.SerializeXml(new DialRequest {
-				Action = (int)DialAction.Connect
+				Action = (int)action
 			});
 			request.AddParameter("text/xml", xmlData, ParameterType.RequestBody);
 			IRestResponse response = await _client.ExecuteTaskAsync(request);
@@ -177,7 +196,15 @@ namespace PhotonConnectionMonitor
 			while (!await GetIsConnectedAsync() && stopwatch.ElapsedMilliseconds <= _dialTimeout) {
 				await Task.Delay(_checkStatusInterval);
 			}
-			return stopwatch.ElapsedMilliseconds > _dialTimeout;
+			bool failedByTimeout = stopwatch.ElapsedMilliseconds > _dialTimeout;
+			if (action == DialAction.Connect && !failedByTimeout && !isRedial) {
+				await Task.Delay(_internetTestDelay);
+				if (!await TestInternet()) {
+					await DialAsync(DialAction.Disconnect);
+					return await DialAsync(DialAction.Connect, true);
+				}
+			}
+			return !failedByTimeout;
 		}
 
 		private async Task TryReloginEndlesslyAsync() {
@@ -189,7 +216,9 @@ namespace PhotonConnectionMonitor
 		private async Task TryReconnectEndlesslyAsync() {
 			while (!await GetIsConnectedAsync()) {
 				await TryReloginEndlesslyAsync();
-				await DialAsync();
+				if (!await DialAsync(DialAction.Connect)) {
+					ClearSession();
+				}
 			}
 		}
 
@@ -197,6 +226,7 @@ namespace PhotonConnectionMonitor
 			while (true) {
 				try {
 					await TryReconnectEndlesslyAsync();
+				} catch {
 				} finally {
 					await Task.Delay(_lazyCheckStatusInterval);
 				}
