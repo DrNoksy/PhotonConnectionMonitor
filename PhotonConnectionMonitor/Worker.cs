@@ -67,7 +67,7 @@ namespace PhotonConnectionMonitor
 		private readonly int _reloginInterval = 3000;
 		private readonly int _checkStatusInterval = 3000;
 		private readonly int _lazyCheckStatusInterval = 10_000;
-		private readonly int _initSessionRetryInterval = 1000;
+		private readonly int _initSessionRetryInterval = 10 * 60 * 1000;
 		private readonly int _dialTimeout = 15_000;
 		private readonly int _internetTestDelay = 3000;
 		private readonly int _redialDelay = 3000;
@@ -201,6 +201,7 @@ namespace PhotonConnectionMonitor
 				await Task.Delay(_internetTestDelay);
 				if (!await TestInternet()) {
 					await DialAsync(DialAction.Disconnect);
+					await Task.Delay(_redialDelay);
 					return await DialAsync(DialAction.Connect, true);
 				}
 			}
