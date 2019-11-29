@@ -66,6 +66,7 @@ namespace PhotonConnectionMonitor
 		private readonly int _reloginInterval = 3000;
 		private readonly int _checkStatusInterval = 3000;
 		private readonly int _lazyCheckStatusInterval = 10_000;
+		private readonly int _initSessionRetryInterval = 10 * 60 * 1000;
 		private readonly int _dialTimeout = 15_000;
 
 		private readonly RestClient _client;
@@ -97,14 +98,18 @@ namespace PhotonConnectionMonitor
 
 		private bool IsSessionEmpty()  => _cookie == null || _csrfTokens.Count == 0;
 
-		private async Task InitSessionIfNeededAsync() {
+		private async Task TryInitSessionEndlesslyAsync() {
 			if (IsSessionEmpty()) {
+				await InitSessionAsync();
+			}
+			while (IsSessionEmpty()) {
+				await Task.Delay(_initSessionRetryInterval);
 				await InitSessionAsync();
 			}
 		}
 
 		private async Task<bool> GetLoginStateAsync() {
-			await InitSessionIfNeededAsync();
+			await TryInitSessionEndlesslyAsync();
 			var request = new RestRequest(_stateLoginUrl, Method.GET);
 			request.AddHeader(_cookieHeaderName, _cookie);
 			IRestResponse response = await _client.ExecuteTaskAsync(request);
@@ -116,7 +121,7 @@ namespace PhotonConnectionMonitor
 			if (await GetLoginStateAsync()) {
 				return true;
 			}
-			await InitSessionIfNeededAsync();
+			await TryInitSessionEndlesslyAsync();
 			var request = new RestRequest(_loginUrl, Method.POST);
 			string csrfToken = _csrfTokens.Pop();
 			string userName = Config.UserName;
@@ -142,7 +147,7 @@ namespace PhotonConnectionMonitor
 		}
 
 		private async Task<ConnectionStatus> GetConnectionStatusAsync() {
-			await InitSessionIfNeededAsync();
+			await TryInitSessionEndlesslyAsync();
 			var request = new RestRequest(_statusUrl, Method.GET);
 			request.AddHeader(_cookieHeaderName, _cookie);
 			IRestResponse response = await _client.ExecuteTaskAsync(request);
@@ -155,7 +160,7 @@ namespace PhotonConnectionMonitor
 		}
 
 		private async Task<bool> DialAsync() {
-			await InitSessionIfNeededAsync();
+			await TryInitSessionEndlesslyAsync();
 			var request = new RestRequest(_dialUrl, Method.POST);
 			request.AddHeader(_cookieHeaderName, _cookie);
 			request.AddHeader(_requestTokenHeaderName, _csrfTokens.Pop());
@@ -190,8 +195,11 @@ namespace PhotonConnectionMonitor
 
 		public async Task StartAsync() {
 			while (true) {
-				await TryReconnectEndlesslyAsync();
-				await Task.Delay(_lazyCheckStatusInterval);
+				try {
+					await TryReconnectEndlesslyAsync();
+				} finally {
+					await Task.Delay(_lazyCheckStatusInterval);
+				}
 			}
 		}
 	}
