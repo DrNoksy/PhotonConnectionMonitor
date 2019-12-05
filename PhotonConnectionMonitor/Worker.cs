@@ -67,7 +67,7 @@ namespace PhotonConnectionMonitor
 		private readonly int _reloginInterval = 3000;
 		private readonly int _checkStatusInterval = 3000;
 		private readonly int _lazyCheckStatusInterval = 10_000;
-		private readonly int _initSessionRetryInterval = 1000;
+		private readonly int _initSessionRetryInterval = 3000;
 		private readonly int _reconnectAfterTotalFailInterval = 15 * 60 * 1000; // 15 minutes
 
 		private readonly int _dialTimeout = 20_000;
@@ -75,6 +75,7 @@ namespace PhotonConnectionMonitor
 
 		private readonly int _maxInternetConnectRetries = 5;
 		private readonly int _maxReconnectRetries = 5;
+		private readonly int _maxInitSessionRetries = 20;
 
 		private readonly RestClient _client;
 		private readonly ILogger _logger = LogManager.GetCurrentClassLogger();
@@ -115,7 +116,7 @@ namespace PhotonConnectionMonitor
 
 		private async Task<bool> TryInitSessionAsync() {
 			int retries = 0;
-			while (IsSessionEmpty() && retries++ < _maxReconnectRetries) {
+			while (IsSessionEmpty() && retries++ < _maxInitSessionRetries) {
 				if (retries > 1) {
 					await Task.Delay(_initSessionRetryInterval);
 				}
