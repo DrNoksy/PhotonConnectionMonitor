@@ -1,11 +1,9 @@
-﻿using RestSharp;
+﻿using NLog;
+using RestSharp;
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Linq;
+using System.Net.NetworkInformation;
 using System.Security.Cryptography;
-using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Xml;
 using System.Xml.Serialization;
@@ -56,7 +54,6 @@ namespace PhotonConnectionMonitor
 		private readonly string _stateLoginUrl = "/api/user/state-login";
 		private readonly string _statusUrl = "/api/monitoring/status";
 		private readonly string _dialUrl = "/api/dialup/dial";
-		private readonly string _internetTestUrl = "https://www.google.com/";
 
 		private readonly string _csrfTokenMetaItemName = "csrf_token";
 		private readonly string _requestTokenHeaderName = "__RequestVerificationToken";
@@ -64,15 +61,23 @@ namespace PhotonConnectionMonitor
 		private readonly string _cookieHeaderName = "Cookie";
 
 		private readonly int _defaultPasswordType = 4;
+
+		private readonly int _redialDelay = 3000;
+
 		private readonly int _reloginInterval = 3000;
 		private readonly int _checkStatusInterval = 3000;
 		private readonly int _lazyCheckStatusInterval = 10_000;
-		private readonly int _initSessionRetryInterval = 10 * 60 * 1000;
-		private readonly int _dialTimeout = 15_000;
-		private readonly int _internetTestDelay = 3000;
-		private readonly int _redialDelay = 3000;
+		private readonly int _initSessionRetryInterval = 1000;
+		private readonly int _reconnectAfterTotalFailInterval = 15 * 60 * 1000; // 15 minutes
+
+		private readonly int _dialTimeout = 20_000;
+		private readonly int _internetTestTimeout = 3000;
+
+		private readonly int _maxInternetConnectRetries = 5;
+		private readonly int _maxReconnectRetries = 5;
 
 		private readonly RestClient _client;
+		private readonly ILogger _logger = LogManager.GetCurrentClassLogger();
 		private string _cookie;
 		private Stack<string> _csrfTokens = new Stack<string>(2);
 
@@ -88,11 +93,13 @@ namespace PhotonConnectionMonitor
 			IRestResponse response = await _client.ExecuteTaskAsync(request);
 			_cookie = Utils.GetHttpHeader(response.Headers, _setCookieHeaderName);
 			_csrfTokens = new Stack<string>(Utils.GetMetaTagContent(response.Content, _csrfTokenMetaItemName));
+			_logger.Debug($"Session was initialized with auth cookie '{_cookie}'");
 		}
 
 		private void ClearSession() {
 			this._cookie = null;
 			this._csrfTokens.Clear();
+			_logger.Debug($"Session was reset");
 		}
 
 		private string ComputeUserPasswordHash(string userName, string userPassword, string csrfToken) {
@@ -104,82 +111,115 @@ namespace PhotonConnectionMonitor
 			return base64ResultHash;
 		}
 
-		private bool IsSessionEmpty()  => _cookie == null || _csrfTokens.Count == 0;
+		private bool IsSessionEmpty() => _cookie == null || _csrfTokens.Count == 0;
 
-		private async Task TryInitSessionEndlesslyAsync() {
-			if (IsSessionEmpty()) {
+		private async Task<bool> TryInitSessionAsync() {
+			int retries = 0;
+			while (IsSessionEmpty() && retries++ < _maxReconnectRetries) {
+				if (retries > 1) {
+					await Task.Delay(_initSessionRetryInterval);
+				}
 				await InitSessionAsync();
 			}
-			while (IsSessionEmpty()) {
-				await Task.Delay(_initSessionRetryInterval);
-				await InitSessionAsync();
-			}
+			return !IsSessionEmpty();
 		}
 
 		private async Task<bool> GetLoginStateAsync() {
-			await TryInitSessionEndlesslyAsync();
-			var request = new RestRequest(_stateLoginUrl, Method.GET);
-			request.AddHeader(_cookieHeaderName, _cookie);
-			IRestResponse response = await _client.ExecuteTaskAsync(request);
-			var content = response.Content;
-			return content == null || !content.Contains("<State>-1</State>");
+			bool isLoggedIn;
+			if (IsSessionEmpty()) {
+				isLoggedIn = false;
+			} else {
+				var request = new RestRequest(_stateLoginUrl, Method.GET);
+				request.AddHeader(_cookieHeaderName, _cookie);
+				IRestResponse response = await _client.ExecuteTaskAsync(request);
+				var content = response.Content;
+				isLoggedIn = content == null || !content.Contains("<State>-1</State>");
+			}
+			string message = isLoggedIn ? "logged in" : "not logged in";
+			_logger.Debug($"Login state: {message}");
+			return isLoggedIn;
 		}
 
 		private async Task<bool> LoginAsync() {
-			if (await GetLoginStateAsync()) {
-				return true;
+			bool isLoggedIn;
+			if (!await TryInitSessionAsync()) {
+				isLoggedIn = false;
+			} else {
+				var request = new RestRequest(_loginUrl, Method.POST);
+				string csrfToken = _csrfTokens.Pop();
+				string userName = Config.UserName;
+				string userPasswordHash = ComputeUserPasswordHash(userName, Config.UserPassword, csrfToken);
+				string xmlData = Utils.SerializeXml(new LoginRequest {
+					Username = userName,
+					Password = userPasswordHash,
+					PasswordType = _defaultPasswordType
+				});
+				request.AddParameter("text/xml", xmlData, ParameterType.RequestBody);
+				request.AddHeader(_cookieHeaderName, _cookie);
+				request.AddHeader(_requestTokenHeaderName, csrfToken);
+				IRestResponse response = await _client.ExecuteTaskAsync(request);
+				_csrfTokens.Push(Utils.GetHttpHeader(response.Headers, _requestTokenHeaderName));
+				_cookie = Utils.GetHttpHeader(response.Headers, _setCookieHeaderName);
+				if (_cookie != null) {
+					_cookie = _cookie.Split(";")[0];
+				}
+				isLoggedIn = response.Content.Contains("<response>OK</response>");
 			}
-			await TryInitSessionEndlesslyAsync();
-			var request = new RestRequest(_loginUrl, Method.POST);
-			string csrfToken = _csrfTokens.Pop();
-			string userName = Config.UserName;
-			string userPasswordHash = ComputeUserPasswordHash(userName, Config.UserPassword, csrfToken);
-			string xmlData = Utils.SerializeXml(new LoginRequest {
-				Username = userName,
-				Password = userPasswordHash,
-				PasswordType = _defaultPasswordType
-			});
-			request.AddParameter("text/xml", xmlData, ParameterType.RequestBody);
-			request.AddHeader(_cookieHeaderName, _cookie);
-			request.AddHeader(_requestTokenHeaderName, csrfToken);
-			IRestResponse response = await _client.ExecuteTaskAsync(request);
-			_csrfTokens.Push(Utils.GetHttpHeader(response.Headers, _requestTokenHeaderName));
-			_cookie = Utils.GetHttpHeader(response.Headers, _setCookieHeaderName);
-			if (_cookie != null) {
-				_cookie = _cookie.Split(";")[0];
-			}
-			if (!response.Content.Contains("<response>OK</response>")) {
-				return false;
-			}
-			return await GetLoginStateAsync();
+			string message = isLoggedIn ? "success" : "fail";
+			_logger.Info($"Login: {message}");
+			return isLoggedIn && await GetLoginStateAsync();
 		}
 
 		private async Task<ConnectionStatus> GetConnectionStatusAsync() {
-			await TryInitSessionEndlesslyAsync();
-			var request = new RestRequest(_statusUrl, Method.GET);
-			request.AddHeader(_cookieHeaderName, _cookie);
-			IRestResponse response = await _client.ExecuteTaskAsync(request);
-			try {
-				ConnectionStatusResponse responseObject = Utils.DeserializeXml<ConnectionStatusResponse>(response.Content);
-				return (ConnectionStatus)responseObject.ConnectionStatus;
-			} catch {
-				return ConnectionStatus.Empty;
+			_logger.Debug("Checking connection status...");
+			ConnectionStatus result;
+			if (IsSessionEmpty()) {
+				result = ConnectionStatus.Empty;
+			} else {
+				var request = new RestRequest(_statusUrl, Method.GET);
+				request.AddHeader(_cookieHeaderName, _cookie);
+				IRestResponse response = await _client.ExecuteTaskAsync(request);
+				try {
+					ConnectionStatusResponse responseObject = Utils.DeserializeXml<ConnectionStatusResponse>(response.Content);
+					result = (ConnectionStatus)responseObject.ConnectionStatus;
+				} catch {
+					result = ConnectionStatus.Empty;
+				}
 			}
+			_logger.Debug($"Connection status: {result.ToString()}");
+			return result;
 		}
 
 		private async Task<bool> GetIsConnectedAsync() {
-			return await GetConnectionStatusAsync() == ConnectionStatus.Connected;
+			return await GetConnectionStatusAsync() == ConnectionStatus.Connected && await TestInternet();
+		}
+
+		private async Task<bool> GetIsDialSuccesAsync(DialAction action) {
+			ConnectionStatus connectionStatus = await GetConnectionStatusAsync();
+			return action == DialAction.Connect
+				? connectionStatus == ConnectionStatus.Connected
+				: connectionStatus != ConnectionStatus.Connected;
 		}
 
 		private async Task<bool> TestInternet() {
-			var client = new RestClient(_internetTestUrl);
-			var request = new RestRequest("", Method.GET);
-			IRestResponse response = await client.ExecuteTaskAsync(request);
-			return response.StatusCode == System.Net.HttpStatusCode.OK;
+			bool result;
+			try {
+				string host = "8.8.8.8";
+				byte[] buffer = new byte[32];
+				PingReply reply = await new Ping().SendPingAsync(host, _internetTestTimeout, buffer, new PingOptions());
+				result = reply.Status == IPStatus.Success;
+			} catch (Exception) {
+				result = false;
+			}
+			string message = result ? "success" : "fail";
+			_logger.Debug($"Internet test: {message}");
+			return result;
 		}
 
-		private async Task<bool> DialAsync(DialAction action, bool isRedial = false) {
-			await TryInitSessionEndlesslyAsync();
+		private async Task<bool> DialAsync(DialAction action) {
+			if (!await TryInitSessionAsync()) {
+				return false;
+			}
 			var request = new RestRequest(_dialUrl, Method.POST);
 			request.AddHeader(_cookieHeaderName, _cookie);
 			request.AddHeader(_requestTokenHeaderName, _csrfTokens.Pop());
@@ -189,47 +229,79 @@ namespace PhotonConnectionMonitor
 			request.AddParameter("text/xml", xmlData, ParameterType.RequestBody);
 			IRestResponse response = await _client.ExecuteTaskAsync(request);
 			_csrfTokens.Push(Utils.GetHttpHeader(response.Headers, _requestTokenHeaderName));
-			if (!response.Content.Contains("<response>OK</response>")) {
+			bool success = response.Content.Contains("<response>OK</response>");
+			string message = success ? "success" : "fail";
+			_logger.Debug($"Dial ({action.ToString()}): {message}");
+			if (!success) {
 				return false;
 			}
 			var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-			while (!await GetIsConnectedAsync() && stopwatch.ElapsedMilliseconds <= _dialTimeout) {
+			while (!await GetIsDialSuccesAsync(action) && stopwatch.ElapsedMilliseconds <= _dialTimeout) {
 				await Task.Delay(_checkStatusInterval);
 			}
 			bool failedByTimeout = stopwatch.ElapsedMilliseconds > _dialTimeout;
-			if (action == DialAction.Connect && !failedByTimeout && !isRedial) {
-				await Task.Delay(_internetTestDelay);
-				if (!await TestInternet()) {
-					await DialAsync(DialAction.Disconnect);
-					await Task.Delay(_redialDelay);
-					return await DialAsync(DialAction.Connect, true);
-				}
-			}
+			message = !failedByTimeout ? "success" : "fail";
+			_logger.Debug($"Dial result ({action.ToString()}): {message}");
 			return !failedByTimeout;
 		}
 
-		private async Task TryReloginEndlesslyAsync() {
-			while (!await LoginAsync()) {
-				await Task.Delay(_reloginInterval);
+		private async Task<bool> ConnectAsync() {
+			_logger.Debug("Trying to connect...");
+			Func<Task<bool>> connect = async () => await DialAsync(DialAction.Connect) && await TestInternet();
+			bool connectedSuccess = await connect();
+			int retryNumber = 0;
+			while (!connectedSuccess && retryNumber++ <= _maxInternetConnectRetries) {
+				await DisonnectAsync();
+				await Task.Delay(_redialDelay);
+				connectedSuccess = await connect();
 			}
+			string message = connectedSuccess ? "was established" : "failed";
+			_logger.Info($"Connection {message}");
+			return connectedSuccess;
 		}
 
-		private async Task TryReconnectEndlesslyAsync() {
-			while (!await GetIsConnectedAsync()) {
-				await TryReloginEndlesslyAsync();
-				if (!await DialAsync(DialAction.Connect)) {
+		private async Task<bool> DisonnectAsync() {
+			_logger.Debug("Trying to disconnect...");
+			Func<Task<bool>> disconnect = async () => await DialAsync(DialAction.Disconnect);
+			bool disconnectedSuccess = await disconnect();
+			disconnectedSuccess = disconnectedSuccess || await disconnect();
+			string message = disconnectedSuccess ? "success" : "fail";
+			_logger.Debug($"Disconnect: {message}");
+			return disconnectedSuccess;
+		}
+
+		private async Task<bool> TryReloginAsync() {
+			bool success;
+			int retries = 0;
+			while (!(success = await LoginAsync()) && retries++ < _maxReconnectRetries) {
+				await Task.Delay(_reloginInterval);
+			}
+			return success;
+		}
+
+		private async Task<bool> TryReconnectAsync() {
+			int retries = 0;
+			while (!await GetIsConnectedAsync() && retries++ < _maxReconnectRetries) {
+				bool isLoggedIn = await GetLoginStateAsync() || await TryReloginAsync();
+				if (!isLoggedIn || !await ConnectAsync()) {
 					ClearSession();
 				}
 			}
+			return await GetIsConnectedAsync();
 		}
 
 		public async Task StartAsync() {
 			while (true) {
+				bool connected = false;
 				try {
-					await TryReconnectEndlesslyAsync();
-				} catch {
+					connected = await TryInitSessionAsync() && await TryReconnectAsync();
+				} catch (Exception ex) {
+					_logger.Error(ex);
 				} finally {
-					await Task.Delay(_lazyCheckStatusInterval);
+					_logger.Info(connected
+						? $"Internet is connected, checking status after {_lazyCheckStatusInterval} ms"
+						: $"Internet connection can not be established, retry after {_reconnectAfterTotalFailInterval}");
+					await Task.Delay(connected ? _lazyCheckStatusInterval : _reconnectAfterTotalFailInterval);
 				}
 			}
 		}

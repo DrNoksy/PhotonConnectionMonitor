@@ -1,4 +1,4 @@
-﻿using System;
+﻿using NLog;
 using System.Threading.Tasks;
 
 namespace PhotonConnectionMonitor
@@ -12,6 +12,8 @@ namespace PhotonConnectionMonitor
 
 		static void Main(string[] args)
 		{
+			ILogger logger = LogManager.GetCurrentClassLogger();
+			logger.Info("Application start...");
 			Task.Run(async () => {
 				await Task.Delay(StartDelay);
 				await new Worker(new WorkerConfig {
@@ -20,6 +22,7 @@ namespace PhotonConnectionMonitor
 					UserPassword = UserPassword
 				}).StartAsync();
 			}).GetAwaiter().GetResult();
+			logger.Info("Application has stopped.");
 		}
 	}
 }
