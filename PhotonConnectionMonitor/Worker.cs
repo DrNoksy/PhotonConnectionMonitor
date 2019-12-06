@@ -68,14 +68,14 @@ namespace PhotonConnectionMonitor
 		private readonly int _checkStatusInterval = 3000;
 		private readonly int _lazyCheckStatusInterval = 10_000;
 		private readonly int _initSessionRetryInterval = 3000;
-		private readonly int _internetTestRetryInterval = 100;
+		private readonly int _internetTestRetryInterval = 50;
 		private readonly int _reconnectAfterTotalFailInterval = 15 * 60 * 1000; // 15 minutes
 
 		private readonly int _dialTimeout = 20_000;
-		private readonly int _internetTestTimeout = 1000;
+		private readonly int _internetTestTimeout = 3000;
 
 		private readonly int _maxInternetConnectRetries = 5;
-		private readonly int _maxInternetTestRetries = 3;
+		private readonly int _maxInternetTestRetries = 5;
 		private readonly int _maxReconnectRetries = 5;
 		private readonly int _maxInitSessionRetries = 20;
 
