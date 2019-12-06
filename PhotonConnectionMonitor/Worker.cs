@@ -282,13 +282,14 @@ namespace PhotonConnectionMonitor
 
 		private async Task<bool> TryReconnectAsync() {
 			int retries = 0;
-			while (!await GetIsConnectedAsync() && retries++ < _maxReconnectRetries) {
+			bool isConnected;
+			while (!(isConnected = await GetIsConnectedAsync()) && retries++ < _maxReconnectRetries) {
 				bool isLoggedIn = await GetLoginStateAsync() || await TryReloginAsync();
 				if (!isLoggedIn || !await ConnectAsync()) {
 					ClearSession();
 				}
 			}
-			return await GetIsConnectedAsync();
+			return isConnected;
 		}
 
 		public async Task StartAsync() {
