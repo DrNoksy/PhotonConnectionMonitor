@@ -68,12 +68,14 @@ namespace PhotonConnectionMonitor
 		private readonly int _checkStatusInterval = 3000;
 		private readonly int _lazyCheckStatusInterval = 10_000;
 		private readonly int _initSessionRetryInterval = 3000;
+		private readonly int _internetTestRetryInterval = 100;
 		private readonly int _reconnectAfterTotalFailInterval = 15 * 60 * 1000; // 15 minutes
 
 		private readonly int _dialTimeout = 20_000;
-		private readonly int _internetTestTimeout = 3000;
+		private readonly int _internetTestTimeout = 1000;
 
 		private readonly int _maxInternetConnectRetries = 5;
+		private readonly int _maxInternetTestRetries = 3;
 		private readonly int _maxReconnectRetries = 5;
 		private readonly int _maxInitSessionRetries = 20;
 
@@ -191,18 +193,7 @@ namespace PhotonConnectionMonitor
 			return result;
 		}
 
-		private async Task<bool> GetIsConnectedAsync() {
-			return await GetConnectionStatusAsync() == ConnectionStatus.Connected && await TestInternet();
-		}
-
-		private async Task<bool> GetIsDialSuccesAsync(DialAction action) {
-			ConnectionStatus connectionStatus = await GetConnectionStatusAsync();
-			return action == DialAction.Connect
-				? connectionStatus == ConnectionStatus.Connected
-				: connectionStatus != ConnectionStatus.Connected;
-		}
-
-		private async Task<bool> TestInternet() {
+		private async Task<bool> TestInternetAsync() {
 			bool result;
 			try {
 				string host = "8.8.8.8";
@@ -215,6 +206,17 @@ namespace PhotonConnectionMonitor
 			string message = result ? "success" : "fail";
 			_logger.Debug($"Internet test: {message}");
 			return result;
+		}
+
+		private async Task<bool> GetIsConnectedAsync() {
+			return await GetConnectionStatusAsync() == ConnectionStatus.Connected && await TryTestInternetAsync();
+		}
+
+		private async Task<bool> GetIsDialSuccesAsync(DialAction action) {
+			ConnectionStatus connectionStatus = await GetConnectionStatusAsync();
+			return action == DialAction.Connect
+				? connectionStatus == ConnectionStatus.Connected
+				: connectionStatus != ConnectionStatus.Connected;
 		}
 
 		private async Task<bool> DialAsync(DialAction action) {
@@ -248,7 +250,7 @@ namespace PhotonConnectionMonitor
 
 		private async Task<bool> ConnectAsync() {
 			_logger.Debug("Trying to connect...");
-			Func<Task<bool>> connect = async () => await DialAsync(DialAction.Connect) && await TestInternet();
+			Func<Task<bool>> connect = async () => await DialAsync(DialAction.Connect) && await TryTestInternetAsync();
 			bool connectedSuccess = await connect();
 			int retryNumber = 0;
 			while (!connectedSuccess && retryNumber++ <= _maxInternetConnectRetries) {
@@ -276,6 +278,15 @@ namespace PhotonConnectionMonitor
 			int retries = 0;
 			while (!(success = await LoginAsync()) && retries++ < _maxReconnectRetries) {
 				await Task.Delay(_reloginInterval);
+			}
+			return success;
+		}
+
+		private async Task<bool> TryTestInternetAsync() {
+			bool success;
+			int retries = 0;
+			while (!(success = await TestInternetAsync()) && retries++ < _maxInternetTestRetries) {
+				await Task.Delay(_internetTestRetryInterval);
 			}
 			return success;
 		}
