@@ -2,6 +2,7 @@
 using RestSharp;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.NetworkInformation;
 using System.Security.Cryptography;
 using System.Threading.Tasks;
@@ -70,6 +71,7 @@ namespace PhotonConnectionMonitor
 		private readonly int _initSessionRetryInterval = 3000;
 		private readonly int _internetTestRetryInterval = 50;
 		private readonly int _reconnectAfterTotalFailInterval = 15 * 60 * 1000; // 15 minutes
+		private readonly int _recheckValidStatusInterval = 3000;
 
 		private readonly int _dialTimeout = 20_000;
 		private readonly int _internetTestTimeout = 3000;
@@ -78,6 +80,7 @@ namespace PhotonConnectionMonitor
 		private readonly int _maxInternetTestRetries = 5;
 		private readonly int _maxReconnectRetries = 5;
 		private readonly int _maxInitSessionRetries = 20;
+		private readonly int _maxRecheckValidStatusRetries = 10;
 
 		private readonly RestClient _client;
 		private readonly ILogger _logger = LogManager.GetCurrentClassLogger();
@@ -173,7 +176,7 @@ namespace PhotonConnectionMonitor
 			return isLoggedIn && await GetLoginStateAsync();
 		}
 
-		private async Task<ConnectionStatus> GetConnectionStatusAsync() {
+		private async Task<ConnectionStatus> GetCurrentConnectionStatusAsync() {
 			_logger.Debug("Checking connection status...");
 			ConnectionStatus result;
 			if (IsSessionEmpty()) {
@@ -191,6 +194,19 @@ namespace PhotonConnectionMonitor
 			}
 			_logger.Debug($"Connection status: {result.ToString()}");
 			return result;
+		}
+
+		private async Task<ConnectionStatus> GetConnectionStatusAsync() {
+			int retries = 0;
+			ConnectionStatus status = ConnectionStatus.Empty;
+			async Task<bool> isValidStatus() => (new[] {
+				ConnectionStatus.Connected,
+				ConnectionStatus.Disconnected
+			}).Contains(status = await GetCurrentConnectionStatusAsync());
+			while (!await isValidStatus() && retries++ < _maxRecheckValidStatusRetries) {
+				await Task.Delay(_recheckValidStatusInterval);
+			}
+			return status;
 		}
 
 		private async Task<bool> TestInternetAsync() {
